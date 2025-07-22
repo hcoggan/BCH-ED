@@ -3,6 +3,8 @@ A repository of the code used to produce the results in our submission to PSB.
 
 # Overview of files
 
+NOTE: The user will have to specify directions for save_filepath in order to run these.
+
 'preprocessing.r': cleans the original data, extracting demographic characteristics, chief complaints, and history of previous visits.
 
 'produce-odds-ratios.r': uses the files produced in preprocessing.r to calculate odds ratios for admission and our secondary outcomes.
