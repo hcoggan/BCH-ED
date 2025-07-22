@@ -44,15 +44,16 @@ weights_test = test_data['training_weight'] #so all visits add up to 1 patient
 
 
 
-best_params = {'n_estimators': 872,
-              'learning_rate':  0.31374123011859456,
-              'subsample': 0.7807310934924976,
+best_params = {'n_estimators': 992,
+              'learning_rate':  0.5974666765171989,
+              'subsample': 0.3988175284874041,
               'max_depth': 9,
-              'colsample_bytree': 0.6378768740719509,
-              'min_child_weight': 1,
+              'colsample_bytree': 0.7506276501255351,
+              'min_child_weight': 3,
               'tree_method': ['gpu_hist'],
               'predictor': ['gpu_predictor']
              }
+
 
 
 #parameters from CV
