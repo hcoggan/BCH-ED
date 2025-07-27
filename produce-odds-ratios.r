@@ -28,6 +28,10 @@ library(xgboost)
 library(glmnet)
 library(cowplot)
 
+
+setwd("your/working/directory")
+save_filepath <- "your/save/filepath"
+
 #Define racial categories.
 races <- c("race_hispanic", "race_non_hispanic_black", "race_asian", "race_unknown", "race_non_hispanic_multiracial", "race_other")
 
@@ -40,6 +44,8 @@ antiepileptic <- c("MIDAZOLAM", "PHENOBARBITAL", "BRIVARACETAM", "CLOBAZAM", "CL
        "PHENYTOIN", "PREGABALIN", "PRIMIDONE", "RUFINAMIDE", "TOPIRAMATE", "VALPROIC ACID", "VIGABATRIN", "ZONISAMIDE") #taken from https://pmc.ncbi.nlm.nih.gov/articles/PMC6130739/
 pain_meds <- c("TRAMADOL", "OXYCODONE", "MORPHINE", "FENTANYL", "KETAMINE") #all but the last are opioids
 antiemetic <- c("ONDANSETRON")
+oral_ibuprofen <- c("ORAL IBUPROFEN")
+topical_let <- c("TOPICAL LET")
  
 
 #Also note whether anything is administered intravenously.
@@ -50,7 +56,9 @@ medical_dict <- list(
     "antiepileptic"=antiepileptic,
     "pain_meds"=pain_meds, 
     "antiemetic"=antiemetic, 
-    "IV"=c("IV"))
+    "IV"=c("IV"),
+    "oral_ibuprofen" =oral_ibuprofen,
+    "topical_let"=topical_let)
 
 
 
@@ -98,6 +106,7 @@ convert_categorical_to_binary <- function(relevant_baseline_factors) {
             if (!is.na(val) & !(val==ref)) {
                 name <- paste0(var, "_", val)
                 converted_factors[[name]] <- ifelse(converted_factors[[var]]==val, 1, 0)
+                assert(!any(is.na(converted_factors[[name]])))
             }
         }
     }
@@ -120,23 +129,11 @@ convert_categorical_to_binary <- function(relevant_baseline_factors) {
 
     converted_factors$cts_miles_travelled[idx_to_replace] <- mean_miles_travelled
 
-    #Similarly weight, which should have been normalised by age group; so mean should be 0 at each age group.
-    #first reattach it, so it can be negative
-    converted_factors <- converted_factors %>% rename(weight=cts_weight)
-  
-    for (group in unique(converted_factors$age_group)) {
-        idx <- which(converted_factors$age_group==group) 
-        rel_weights <- converted_factors$weight[idx]
-        mean <- mean(rel_weights, na.rm=TRUE)
-        sd <- sd(rel_weights, na.rm=TRUE)
-        converted_factors$weight[idx] <- abs(rel_weights-mean)/sd #we want to make it absolute here so there's really no point in reattaching it I guess
-    }
+    idx_to_replace <- which(is.na(as.numeric(converted_factors$cts_weight)))
 
-    idx_to_replace <- which(is.na(as.numeric(converted_factors$weight)))
-
-    converted_factors$weight_unknown <- 0
-    converted_factors$weight_unknown[idx_to_replace] <- 1
-    converted_factors$weight[idx_to_replace] <- 0 #since it should be normalised by weight
+    converted_factors$cts_weight_unknown <- 0
+    converted_factors$cts_weight_unknown[idx_to_replace] <- 1
+    converted_factors$cts_weight[idx_to_replace] <- 0 #since it should be normalised by weight
 
     converted_factors <- converted_factors %>% select(-c(all_of(c(factors_to_convert[!(factors_to_convert=="age_group")], "age_in_days")))) %>% clean_names()
     return(converted_factors)
@@ -231,7 +228,7 @@ link_vitals <- function(converted_baseline_factors, events, age_to_csn,
     }
 
     #Discard age groups, which are no longer needed.
-    converted_baseline_factors <- converted_baseline_factors %>% select(-age_group)
+    converted_baseline_factors <- converted_baseline_factors %>% select(-c(age_group))
     return(converted_baseline_factors)
 
 }
@@ -273,8 +270,9 @@ get_propensity_scores <- function(converted_baseline_factors, exposures, using_a
 
         #Convert factors to numerics.
         csns <- relevant_population$csn
-        Xs <- relevant_population %>% select(-all_of(c(colnames(relevant_population)[colnames(relevant_population) %in% c(exposures, "ref", "csn", "is_admitted", "X", "X.1", "x_1", "x_x", "x_y")]))) 
+        Xs <- relevant_population %>% select(-all_of(c(colnames(relevant_population)[colnames(relevant_population) %in% c(exposures, "ref", "csn", "is_admitted", "x", "X", "X.1", "x_1", "x_x", "x_y")]))) 
         Xs <- as.matrix(as.data.frame(sapply(Xs, as.numeric)))
+        print(colnames(Xs))
         ys <- factor(relevant_population[[exposure]], levels=c(0, 1))
 
 
@@ -323,6 +321,8 @@ assemble_propensity_scores <- function(cvtd_factors) {
 calculate_odds_ratios <- function(outcome_vars, exposure, ref, propensity_scores, baseline_factors, 
         threshold=0.1, ps_method="glm", using_all_vitals=FALSE, using_all_factors=TRUE, unadjusted=FALSE, intervention_df=NULL, target_csns=NULL, characteristic_name=NULL) {
 
+            
+
     odds_ratios <- data.frame(exposure=character(0), 
         outcome_var=character(0), 
         estimate=numeric(0),
@@ -337,8 +337,8 @@ calculate_odds_ratios <- function(outcome_vars, exposure, ref, propensity_scores
 
     index <- 1
     
+    df <- data.frame(baseline_factors) 
 
-   df <- data.frame(baseline_factors) 
 
     #Exclude factors not included in propensity scores from balancing.
     illegal_covariates <- c("csn", "is_admitted", "X", "x_1", "x", "X.1", "x_x", "x_y", "ed_los_quartile_1", "ed_los_quartile_2", "ed_los_quartile_3", "ed_los_quartile_4")
@@ -365,25 +365,30 @@ calculate_odds_ratios <- function(outcome_vars, exposure, ref, propensity_scores
         illegal_covariates <- c(illegal_covariates, colnames(df)[startsWith(colnames(df), "triage_vitals_")])
     } else {illegal_covariates  <- c(illegal_covariates, colnames(df)[startsWith(colnames(df), "overall_vitals_") | startsWith(colnames(df), "triage_acuity")], "pediatric_comorbidity_score")} #otherwise drop specific triage vitals
 
+
     #Identify the covariates we want to balance.
     covariates <- colnames(df)[!(colnames(df) %in% unique(illegal_covariates))]
-
 
     #If we need access to the decisions taken during the stay, link them here.
     if (!is.null(intervention_df)) {
         df <- df %>% inner_join(intervention_df, by="csn")
     }
 
+
+
     #if we want to filter the dataframe for specific CSNs, we can do so here.
     if (!is.null(target_csns)) {
         df <- df %>% filter(csn %in% target_csns)
     }
+
 
     #Link relevant propensity score, and don't use any visit which has an NA in that score
     #Now the dataframe is only the exposure and reference category.
     ps <- propensity_scores %>% filter(type==ifelse(using_all_vitals, "overall", "triage"), 
         completeness==ifelse(using_all_factors, "complete", "partial"), treatment==exposure) %>% select(csn, propensity_score)
     df <- df %>% inner_join(ps, by="csn") %>% filter(!is.na(propensity_score)) 
+
+
 
     #If unadjusted==TRUE then this step will have selected a random propensity score based on default covariates
     #and used that to choose patients who are part of either the exposure or reference group.
@@ -399,6 +404,7 @@ calculate_odds_ratios <- function(outcome_vars, exposure, ref, propensity_scores
 
     #Define formula for balancing
     ps_formula <- as.formula(paste(exposure, "~", paste(covariates, collapse = " + ")))
+
 
     #Perform matching.
     tryCatch({
@@ -466,8 +472,59 @@ calculate_odds_ratios <- function(outcome_vars, exposure, ref, propensity_scores
 
 }
 
+#Get odds ratios describing the likelihood that a patient will be triaged at a certain level, or admitted.
+get_triage_and_admission_ors <- function(cvtd_factors, propensity_scores) {
+
+    exposures <- c(races, "sex_f")
+    refs <- c(rep("race_non_hispanic_white", length(races)), "sex_m")
+
+
+    for (threshold in c(0.1, 0.2)) {
+        for (method in c("glm")) {
+
+            overall_triage_ors <- data.frame()
+            overall_admission_ors <- data.frame()
+
+            for (j in 1:length(exposures)) {
+                exposure <- exposures[j]
+                ref <- refs[j]
+
+                 #calculate admission_ors with and without all factors
+                adm_ors_full <- calculate_odds_ratios(c("is_admitted"), exposure, ref, propensity_scores, cvtd_factors,
+                        threshold=threshold, ps_method=method, using_all_vitals=TRUE, using_all_factors = TRUE)
+                adm_ors_full$completeness <- "complete"
+
+                adm_ors_partial <- calculate_odds_ratios(c("is_admitted"), exposure, ref, propensity_scores, cvtd_factors,
+                        threshold=threshold, ps_method=method, using_all_vitals=TRUE, using_all_factors = FALSE)
+                adm_ors_partial$completeness <- "partial"
+                
+                 adm_ors_unadjusted <- calculate_odds_ratios(c("is_admitted"), exposure, ref, propensity_scores, cvtd_factors,
+                        threshold=threshold, ps_method=method, unadjusted=TRUE)
+                adm_ors_unadjusted$completeness <- "unadjusted"
+                
+
+
+                triage_ors <- calculate_odds_ratios(paste0(c("triage_acuity_"), c(1, 2, 3, 4, 5)), exposure, ref, propensity_scores, cvtd_factors,
+                        threshold=threshold, ps_method=method, using_all_vitals=FALSE, using_all_factors = TRUE)
+
+                
+                overall_triage_ors <- rbind(overall_triage_ors, triage_ors)
+                overall_admission_ors <- rbind(overall_admission_ors, adm_ors_full, adm_ors_partial, adm_ors_unadjusted)
+                
+            }
+
+            overall_triage_ors <- overall_triage_ors %>% filter(!is.na(exposure))
+            overall_admission_ors <- overall_admission_ors %>% filter(!is.na(exposure))
+
+            write.csv(overall_triage_ors, paste0(save_filepath, "/", method, "/caliper_", threshold, "/triage-ors.csv"))
+            write.csv(overall_admission_ors, paste0(save_filepath, "/", method, "/caliper_", threshold, "/adm-ors.csv"))
+        }
+    }
+}
+
+
 #Calculate the odds ratios for being 'assigned' to each quartile of LOS.
-get_length_of_stay_ors <- function(cvtd_factors, events) {
+get_length_of_stay_ors <- function(cvtd_factors, events, propensity_scores) {
 
     exposures <- c(races, "sex_f")
     refs <- c(rep("race_non_hispanic_white", length(races)), "sex_m")
@@ -483,7 +540,6 @@ get_length_of_stay_ors <- function(cvtd_factors, events) {
         lower_threshold <- ifelse(j==1, 0, quartile_thresholds[j-1])
         upper_threshold <- quartile_thresholds[j]
         quartile_colname <- paste0("ed_los_quartile_", j)
-        print(quartile_colname)
         if (j==4) {
             bf[[quartile_colname]] <- ifelse(bf$ed_los >= lower_threshold, 1, 0)
         } else {
@@ -516,6 +572,8 @@ get_length_of_stay_ors <- function(cvtd_factors, events) {
         }
     }
 }
+
+
 
 
 #Count the number of instances of each medication (medications are only counted specifically if non-IV;
@@ -572,13 +630,13 @@ assemble_test_data <- function(cvtd_factors, events) {
 
 #For each 'intervention' (meds and tests), calculate the odds ratio 
 #that each group will receive it (relative to the reference group).
-get_intervention_ors <- function() {
+get_intervention_ors <- function(intervention_outcome_vars, propensity_scores, cvtd_factors, intervention_df, thresholds=c(0.1)) {
 
     exposures <- c(races, "sex_f")
     refs <- c(rep("race_non_hispanic_white", length(races)), "sex_m")
 
     #Run this for two different caliper thresholds.
-    for (threshold in c(0.1, 0.2)) {
+    for (threshold in thresholds) {
         for (method in c("glm")) {
 
             overall_intervention_ors <- data.frame()
@@ -632,7 +690,7 @@ assemble_filtration_characteristics <- function(baseline_factors, intervention_d
     non_intv$non_medicaid_insurance <- ifelse(non_intv$has_medicaid==0, 1, 0)
 
     #Record whether patients have certain variables (weight, min/max HR, min/max RR) a certain number of SDs beyond mean.
-    for (col in c("weight", "overall_vitals_max_heart_rate", "overall_vitals_min_heart_rate", "overall_vitals_max_respiratory_rate", "overall_vitals_min_respiratory_rate")) {
+    for (col in c("cts_weight", "overall_vitals_max_heart_rate", "overall_vitals_min_heart_rate", "overall_vitals_max_respiratory_rate", "overall_vitals_min_respiratory_rate")) {
         non_intv[[paste0(col, "_less_than_1_sd")]] <- ifelse(bf[[col]] < 1, 1, 0)
         non_intv[[paste0(col, "_1_to_2_sd")]] <- ifelse(bf[[col]] >= 1 & bf[[col]] < 2, 1, 0)
         non_intv[[paste0(col, "_more_than_2_sd")]] <- ifelse(bf[[col]] > 2, 1, 0)
@@ -658,12 +716,22 @@ assemble_filtration_characteristics <- function(baseline_factors, intervention_d
     #Divide contunuous factors into quartiles, excluding unknown values.
     factors_to_quartile <- c("cts_sdi_score", "cts_miles_travelled", "ord_num_patients_at_arrival", "ed_los")
 
+    assert(!any(is.na(bf$ed_los)))
+    assert(!any(is.na(bf$ord_num_patients_at_arrival)))
+
     for (colname in factors_to_quartile) {
-        quartile_thresholds <- quantile(bf[[colname]][bf[[paste0(colname, "_unknown")]]==0], probs=c(0.25, 0.5, 0.75, 1))
+        if(paste0(colname, "_unknown") %in% colnames(bf)) {
+            quartile_thresholds <- quantile(bf[[colname]][bf[[paste0(colname, "_unknown")]]==0], probs=c(0.25, 0.5, 0.75, 1))
+        } else {
+            quartile_thresholds <- quantile(bf[[colname]], probs=c(0.25, 0.5, 0.75, 1))
+        }
+        print(quartile_thresholds)
         for (j in 1:4) {
             lower_threshold <- ifelse(j==1, 0, quartile_thresholds[j-1])
             upper_threshold <- quartile_thresholds[j]
             quartile_colname <- paste0(colname, "_quartile_", j)
+            print(lower_threshold)
+            print(upper_threshold)
             if(paste0(colname, "_unknown") %in% colnames(bf)) { #if there is an unknown category, exclude those from quartile division
                 if (j==4) {
                     non_intv[[quartile_colname]] <- ifelse(bf[[colname]] >= lower_threshold & bf[[paste0(colname, "_unknown")]]==0, 1, 0)
@@ -704,7 +772,8 @@ get_admission_ors_from_specific_populations <- function(filtered_df, propensity_
 
             characteristics <- colnames(filtered_df)[!(colnames(filtered_df) == "csn") & !(startsWith(colnames(filtered_df), "x")) & !(startsWith(colnames(filtered_df), "X"))]
             
-            for (exposure_index in 1:length(exposures)) {
+            #Examine associations for female, Hispanic and NHB patients (the first 3 exposures.)
+            for (exposure_index in 1:3) {
                 exposure <- exposures[exposure_index]
                 ref <- refs[exposure_index]
 
@@ -727,9 +796,19 @@ get_admission_ors_from_specific_populations <- function(filtered_df, propensity_
 get_odds_ratios <- function() {
 
     #Load data, and limit the analyses to only patients with a recorded admission or discharge.
-    baseline_factors <- read.csv("baseline-factors-with-top-200-complaint-stems-tagged.csv", encoding = "UTF-8") %>% 
+    baseline_factors <- read.csv("baseline-factors-with-top-200-complaint-stems-tagged.csv", encoding = "UTF-8") 
+
+
+    to_count <- read.csv("/load/directory/demographics_8May.csv") %>% rename(csn=CSN, mrn=MRN) %>% select(csn, mrn) %>% inner_join(baseline_factors, by="csn")
+    print(paste(length(unique(to_count$csn)), "visits from", length(unique(to_count$mrn)), "patients"))
+
+     #Load data, and limit the analyses to only patients with a recorded admission or discharge.
+    baseline_factors <- baseline_factors %>% 
         filter(is_admitted==1 | is_discharged==1) %>%
         select(-c(length_of_stay_in_minutes, ed_arrival_time, ed_checkout_time, arrival_timestamp, is_discharged)) 
+
+    to_count <- read.csv("/load/directory/demographics_8May.csv") %>% rename(csn=CSN, mrn=MRN) %>% select(csn, mrn) %>% inner_join(baseline_factors, by="csn")
+    print(paste(length(unique(to_count$csn)), "visits from", length(unique(to_count$mrn)), "patients"))
 
 
     #Link pediatric comorbidity score
@@ -737,25 +816,35 @@ get_odds_ratios <- function() {
     baseline_factors <- baseline_factors %>% inner_join(pci_scores, by="csn")
 
 
-    #Load all events (e.g. administration of meds)
+    # #Load all events (e.g. administration of meds)
     events <- read.csv("focused-patient-journey-events.csv")
 
-    #Convert categorical to binary variables.
+    # #Convert categorical to binary variables.
     cvtd_factors <- convert_categorical_to_binary(baseline_factors)
+    write.csv(cvtd_factors, "cvtd-factors-with-tagged-complaint.csv")
 
-    #Link age in days for PALS criteria.
+
+    # #Link age in days for PALS criteria.
     age_to_csn <- baseline_factors %>% select(csn, age_in_days) 
     cvtd_factors <- link_vitals(cvtd_factors, events, age_to_csn)
 
 
+
+    write.csv(cvtd_factors, paste0(save_filepath, "converted-baseline-factors-with-linked-vitals.csv"))
+    cvtd_factors <- read.csv(paste0(save_filepath, "converted-baseline-factors-with-linked-vitals.csv"))
+
+
+
     #Calculate propensity scores
-    ps_results <- assemble_propensity_scores(cvtd_factors)
+    propensity_scores <- assemble_propensity_scores(cvtd_factors)
+    write.csv(propensity_scores, paste0(save_filepath, "propensity-scores.csv"))
+    propensity_scores <- read.csv(paste0(save_filepath, "propensity-scores.csv"))
 
     #Get odds ratios for ESI score and overall admission.
-    get_triage_and_admission_ors()
+    get_triage_and_admission_ors(cvtd_factors, propensity_scores)
 
     #Get odds ratios for length of stay.
-    get_length_of_stay_ors(cvtd_factors, events)
+    get_length_of_stay_ors(cvtd_factors, events, propensity_scores)
 
     #Load the interventions received by each patient
     med_df <- assemble_med_data(cvtd_factors, events, medical_dict)
@@ -766,20 +855,27 @@ get_odds_ratios <- function() {
 
 
     #Get odds ratios for other interventions (e.g. meds, tests).
-    get_intervention_ors()
+    get_intervention_ors(intervention_outcome_vars, propensity_scores, cvtd_factors, intervention_df)
 
     filtered_df <- assemble_filtration_characteristics(cvtd_factors, intervention_df, events)
+    write.csv(filtered_df, paste0(save_filepath, "filtered_df.csv"))
+
+    #Print how many people have Medicaid at each SDI quartile.
+    print(paste("Medicaid uptake in SDI Q1:", sum(filtered_df$has_medicaid[which(filtered_df$cts_sdi_score_quartile_1==1)])/length(which(filtered_df$cts_sdi_score_quartile_1==1))))
+    print(paste("Medicaid uptake in SDI Q2:", sum(filtered_df$has_medicaid[which(filtered_df$cts_sdi_score_quartile_2==1)])/length(which(filtered_df$cts_sdi_score_quartile_2==1))))
+    print(paste("Medicaid uptake in SDI Q3:", sum(filtered_df$has_medicaid[which(filtered_df$cts_sdi_score_quartile_3==1)])/length(which(filtered_df$cts_sdi_score_quartile_3==1))))
+    print(paste("Medicaid uptake in SDI Q4:", sum(filtered_df$has_medicaid[which(filtered_df$cts_sdi_score_quartile_4==1)])/length(which(filtered_df$cts_sdi_score_quartile_4==1))))
+
+
 
     #Get odds ratios for admission post-intervention.
     get_admission_ors_from_specific_populations(filtered_df, propensity_scores, cvtd_factors,
         threshold=0.1, ps_method="glm") 
-    get_admission_ors_from_specific_populations(filtered_df, propensity_scores, cvtd_factors,
-        threshold=0.2, ps_method="glm") 
+    # get_admission_ors_from_specific_populations(filtered_df, propensity_scores, cvtd_factors,
+    #     threshold=0.2, ps_method="glm") 
 
 }
 
 
 
 get_odds_ratios()
-
-
