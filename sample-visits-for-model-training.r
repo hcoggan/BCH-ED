@@ -24,25 +24,27 @@ library(exact2x2)
 library(cobalt)
 library(zipcodeR)
 
+setwd("your/working/directory")
+ save_filepath <- "your/save/filepath"
+
 #Prepare data for use in XGB training model
 #Attach top 100 labs (not eventually used) and medication-route combinations.
 load_data <- function() {
     baseline_factors <- read.csv("preprocessed_demographics_for_epi.csv")
 
     linked_stays_for_epi <- read.csv("linked_stays_for_epi.csv")
-    triage_vital_names <- c("hypotensive_at_triage", "fever_at_triage", "low_temp_at_triage", "cts_mean_ox_at_triage", "cts_mean_heart_rate_before_triage", "cts_mean_respiratory_rate_before_triage", "ord_max_pain_at_triage")  
-    linked_stays_for_epi <- linked_stays_for_epi %>% select(all_of(c("csn", "hour_of_arrival", "day_of_arrival", "month_of_arrival", "year_of_arrival", triage_vital_names))) 
+    linked_stays_for_epi <- linked_stays_for_epi %>% select(all_of(c("csn", "hour_of_arrival", "day_of_arrival", "month_of_arrival", "year_of_arrival"))) 
     baseline_factors <- inner_join(baseline_factors, linked_stays_for_epi, by="csn") %>% filter(is_admitted==1 | is_discharged==1)
 
 
-    labs <- read.csv("labs.csv")
-    medications <- read.csv("medications.csv")
+    labs <- read.csv("/Volumes/chip-lacava/Groups/BCH-ED/HC-or-work-PSB-run/labs.csv")
+    medications <- read.csv("/Volumes/chip-lacava/Groups/BCH-ED/HC-or-work-PSB-run/medications.csv")
 
-    scores <- read.csv("scores.csv")
+    scores <- read.csv("/Volumes/chip-lacava/Groups/BCH-ED/HC-or-work-PSB-run/scores.csv")
     scores <- scores %>% filter(SCORE_VARIABLE=="NRS Generalized Pain Score")
-    vitals <- read.csv("vitals.csv")
-    radiology <- read.csv("radiology_15Apr.csv")
-    demographics <- read.csv("demographics.csv")
+    vitals <- read.csv("/Volumes/chip-lacava/Groups/BCH-ED/HC-or-work-PSB-run/vitals.csv")
+    radiology <- read.csv("/Volumes/chip-lacava/Groups/BCH-ED/HC-or-work-PSB-run/radiology_15Apr.csv")
+    demographics <- read.csv("/Volumes/chip-lacava/Groups/BCH-ED/HC-or-work-PSB-run/demographics_8May.csv")
 
     #Link CSNs for radiology
     info_to_csn_df <- demographics %>% select(NAME, DOB, ED_ARRIVAL_TIME, CSN) %>% distinct(NAME, DOB, ED_ARRIVAL_TIME, CSN)
@@ -106,14 +108,14 @@ load_data <- function() {
 
     decisions <- decisions %>% filter(!(event_type=="arrival")) %>% group_by(csn) %>% arrange(event_time, .by_group = TRUE)
 
-    write.csv(decisions, "patient-journey-decisions-raw-names.csv")
+    write.csv(decisions, paste0(save_filepath, "patient-journey-decisions-raw-names.csv"))
 
     results <- inner_join(results, arrival_timestamps, by="csn")
     results$event_time <- difftime(ymd_hms(results$event_time, truncated = 3), ymd_hms(results$arrival_time, truncated = 3), units="mins") 
     results <- inner_join(results, endpoints, by="csn") %>% filter(event_time <= endpoint, event_time >= 0) %>% select(-endpoint) #discard vitals taken after checkout time and before timeframe of visit
     results <- results %>% select(-arrival_time) %>% group_by(csn)  %>% arrange(event_time, .by_group = TRUE)
 
-    write.csv(results, "patient-journey-results-raw-names.csv")`
+    write.csv(results, paste0(save_filepath, "patient-journey-results-raw-names.csv"))
 }
 
 
@@ -298,8 +300,7 @@ load_data()
 
 #Load timestamps, and filter out visits for which no decision was made.
 arrival_timestamps <- read.csv("baseline-factors-with-top-200-complaint-stems-tagged.csv") %>% filter(is_admitted==1 | is_discharged==1) %>% select(csn, arrival_timestamp)
-converted_baseline_factors <- read.csv("cvtd-factors-with-tagged-complaint.csv") %>%
-    rename(cts_weight=weight, cts_weight_unknown=weight_unknown) 
+converted_baseline_factors <- read.csv("cvtd-factors-with-tagged-complaint.csv")
 decisions <- read.csv("patient-journey-decisions-raw-names.csv")
 results <- read.csv("patient-journey-results-raw-names.csv")
 
