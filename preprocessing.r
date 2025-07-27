@@ -10,6 +10,7 @@ library(stringr)
 library(patchwork)
 library(forcats)
 library(pROC)
+library(vroom)
 hgd()
 
 library(knitr)
@@ -23,6 +24,14 @@ library(data.table)
 library(exact2x2)
 library(cobalt)
 library(zipcodeR)
+library(data.table)
+library(readr)
+library(SnowballC)
+
+
+setwd("your/working/directory")
+save_filepath <- "your/save/path"
+
 
 #SUPPLEMENTARY FUNCTIONS:
 
@@ -79,22 +88,8 @@ retrieve_state <- function(zip_code, unique_zip_codes, states) {
     ifelse(zip_code %in% unique_zip_codes, states[[zip_code]], "unknown")
 }
 
-#Count a patient's prior non-admitted visits.
-count_prior_visits_without_admission <- function(v_id, patient_id, time) {
-    subdf <- prior_visits %>% filter(MRN == patient_id & !(CSN == v_id) & arrival_timestamp < time & arrival_timestamp > (time - thirty_days) & is_admitted==0)
-    return(nrow(subdf))
-}
 
-#Count a patient's prioer admissions.
-count_prior_admissions <- function(v_id, patient_id, time) {
-    subdf <- prior_visits %>% filter(MRN == patient_id & !(CSN == v_id) & arrival_timestamp < time & arrival_timestamp >= (time - thirty_days) & is_admitted==1)
-    return(nrow(subdf))
-}
 
-#Count the number of patients there at the start of a visit.
-get_patients_present_at_arrival <- function(t, arrival_times, departure_times) {
-    return(sum(arrival_times < t & departure_times > t))
-}
 
 #Generate lists of ICD prefixes within a given range.
 generate_icd_prefixes <- function(starting_letter, start, end, exceptions) {
@@ -136,7 +131,7 @@ hypotensive <- function(sbp, age_in_months) {
 
 
 #Extract words from a chief complaint.
-extract_words <- function(complaint) {
+extract_words <- function(complaint, all_words) {
     list_of_words <- stringr::word(str_replace_all(complaint, "[[:punct:]]", " "))
     all_words <- c(all_words, list_of_words)
 
@@ -153,7 +148,7 @@ convert_complaints <- function(i, baseline_factors, stems_to_use) {
 
 
 #Clean names of medications
-clean_names <- function(x) {
+clean_value_names <- function(x) {
   x %>%
     str_to_lower() %>%
     str_replace_all("[^a-z0-9_]", "_") %>%
@@ -161,17 +156,26 @@ clean_names <- function(x) {
     str_remove("^_|_$")
 }
 
+#Count the number of patients there at the start of a visit.
+get_patients_present_at_arrival <- function(t, arrival_times, departure_times) {
+    return(sum(arrival_times < t & departure_times > t))
+}
+
 
 #MAIN FUNCTION: Link demographic data from across files.
 link_demographics <- function() {
 
-	demographics <- read.csv("demographics.csv")
+	demographics <- read.csv("demographics_8May.csv")
+
+    print(paste("OG visits", nrow(demographics)))
 
 	#link race and keep only unique visits
 	demographics_with_race <- read.csv("demographics_1May.csv")
-	demographics_with_race <- demographics_with_race %>% select(CSN, RACE, AGE) %>% group_by(CSN) %>% mutate(count=n()) %>% filter(count==1) %>% select(-count)
-	demographics <- demographics %>% select(-c(GENDER.1, ZIP_CODE.1)) %>% group_by(CSN) %>% mutate(count=n()) %>% filter(count==1) %>% select(-count)
+	demographics_with_race <- demographics_with_race %>% select(CSN, RACE, AGE) %>% group_by(CSN) %>% mutate(count=n()) %>% filter(count==1) %>% select(-count) %>% ungroup()
+	demographics <- demographics %>% select(-c(GENDER.1, ZIP_CODE.1)) %>% group_by(CSN) %>% mutate(count=n()) %>% filter(count==1) %>% select(-count) %>% ungroup()
 	demographics <- inner_join(demographics, demographics_with_race, by="CSN")
+
+    print(paste("Visits with unique ID", nrow(demographics)))
 
 
     #link age in days
@@ -185,8 +189,11 @@ link_demographics <- function() {
     #there are about a hundred people whose sex is M and gender is "transgender M" and vice versa; we assume thismeans they are actually trans and their sex has been mis-recorded
     demographics$SEX <- ifelse(demographics$GENDER=="Transgender Female", "M", ifelse(demographics$GENDER=="Transgender Male", "F", demographics$SEX))
 
+
     #<20 people have no recorded sex (U or X); we discard them
     demographics <- demographics %>% filter(!(SEX=="U" | SEX =="X"))
+
+    print(paste("Visits with identifiable sex", nrow(demographics)))
 
 
     #'Other', 'Trans', or "NB" will get you this marker, as will a reported gender other than your sex
@@ -251,6 +258,9 @@ link_demographics <- function() {
     demographics$is_discharged <- ifelse(demographics$DERIVED_DESPOSITON == "Discharge" | demographics$DERIVED_DESPOSITON == "Home", 1, 0)
 
     demographics <- demographics %>% filter(!((DERIVED_DESPOSITON == "Unknown" | DERIVED_DESPOSITON == ""))) %>% select(-DERIVED_DESPOSITON)
+
+    print(paste("Visits with identifiable disposition", nrow(demographics)))
+
 
     #PREFERRED LANGUAGE
     #keep English, Spanish and other
@@ -389,11 +399,10 @@ link_demographics <- function() {
     demographics$TRIAGE_ACUITY <- ifelse(demographics$TRIAGE_ACUITY=="", "Unknown", demographics$TRIAGE_ACUITY)
 
 
-    #Filter out visits 'shorter than 0 minutes' or longer than 24 hours.
-    demographics <- demographics %>% select(-ADMIT_DATE) %>% filter(LENGTH.OF.STAY..IN.MINUTES. > 0  & LENGTH.OF.STAY..IN.MINUTES. < 24*60)
+    #Filter out visits 'shorter than 0 minutes'.
+    demographics <- demographics %>% select(-ADMIT_DATE) %>% filter(LENGTH.OF.STAY..IN.MINUTES. > 0 & LENGTH.OF.STAY..IN.MINUTES. < 24*60)
 
-    #Identify time to triage. This was later found to be unreliable, and so is not used in later analyses.
-    demographics$time_to_triage <-  difftime(demographics$TRIAGE_START_DT_TM, demographics$ED_ARRIVAL_TIME, units="mins")
+    print(paste("Visits within 24 hours", nrow(demographics)))
 
 
     #Identify previous visits (without admission) within 30 days, and visits with admission within 30 days; 
@@ -402,60 +411,91 @@ link_demographics <- function() {
     first_stamp <- min(demographics$ED_ARRIVAL_TIME)
     demographics$arrival_timestamp <- difftime(demographics$ED_ARRIVAL_TIME, first_stamp, units="mins")
 
+    #Get a proxy for NEDOCS- how many other patients are there when a patient arrives?
+    demographics$departure_timestamp <- difftime(demographics$ED_CHECKOUT_TIME, first_stamp, units="mins")
+    demographics$ord_num_patients_at_arrival<- purrr::map_vec(demographics$arrival_timestamp, function(x) get_patients_present_at_arrival(x, demographics$arrival_timestamp, demographics$departure_timestamp), .progress = TRUE)
+
+
     #Now work out how many visits there are within 30 days that don't result in admission
     #We only need to do this for patients who visit more than once
     prior_visits <- demographics %>% group_by(MRN) %>% mutate(num_total_visits = n()) %>% ungroup() %>% filter(num_total_visits > 1)
-    thirty_days <- 60*24*30 #in minutes
+
 
     #Count prior visits with and without admission.
-    prior_visits$num_prior_visits_without_admission <- purrr::pmap_vec(list(prior_visits$CSN, prior_visits$MRN, prior_visits$arrival_timestamp), count_prior_visits_without_admission, .progress = TRUE)
-    prior_visits$num_prior_admissions <- purrr::pmap_vec(list(prior_visits$CSN, prior_visits$MRN, prior_visits$arrival_timestamp), count_prior_admissions, .progress = TRUE)
+    prior_visits <- prior_visits %>%
+        arrange(MRN, arrival_timestamp) %>%
+        group_by(MRN) %>% #Only look within visits by same patient
+        mutate(
+            num_prior_visits_without_admission = purrr::map_dbl(row_number(), function(i) {
+            current_time <- arrival_timestamp[i]
+            current_csn <- CSN[i]
+            thirty_days_ago <- current_time - 24*60*30
+            
+            sum(arrival_timestamp < current_time & #Look for other visits from the same patient within 30 days
+                arrival_timestamp > thirty_days_ago & 
+                CSN != current_csn & 
+                is_admitted == 0, 
+                na.rm = TRUE)
+            }),
+            num_prior_admissions = purrr::map_dbl(row_number(), function(i) {
+            current_time <- arrival_timestamp[i]
+            current_csn <- CSN[i]
+            thirty_days_ago <- current_time - 24*60*30
+            
+            sum(arrival_timestamp < current_time & 
+                arrival_timestamp > thirty_days_ago & 
+                CSN != current_csn & 
+                is_admitted == 1, 
+                na.rm = TRUE)
+            })
+        ) %>%
+        ungroup()
 
     #Link back to the original dataframe, and fill in 0s for those with no entry
     prior_visits <- prior_visits %>% select(CSN, num_prior_admissions, num_prior_visits_without_admission)
+    write.csv(prior_visits, "prior_visits.csv")
     demographics <- left_join(demographics, prior_visits, by="CSN")
+
     demographics$num_prior_admissions <- ifelse(is.na(demographics$num_prior_admissions), 0, demographics$num_prior_admissions)
     demographics$num_prior_visits_without_admission <- ifelse(is.na(demographics$num_prior_visits_without_admission), 0, demographics$num_prior_visits_without_admission)
 
 
-    #and finally, get a proxy for NEDOCS- how many other patients are there when a patient arrives?
-    demographics$departure_timestamp <- difftime(demographics$ED_CHECKOUT_TIME, first_stamp, units="mins")
-    demographics$ord_num_patients_at_arrival<- purrr::map_vec(demographics$arrival_timestamp, function(x) get_patients_present_at_arrival(x, demographics$arrival_timestamp, demographics$departure_timestamp), .progress = TRUE)
-
+    
     #Finally, clean names and return the file.
     demographics <- demographics %>% clean_names()
-    write.csv(demographics, "preprocessed_demographics_for_epi.csv")
+    write.csv(demographics, paste0(save_filepath, "preprocessed_demographics_for_epi.csv"))
 
 }
 
 
-#Next, link labs, tests and vitals, and get the PCI score
-#NOTE: Vitals will be linked to individual visit-timepoints again before computing ORs.
+#Next, get PCI scores, and COUNT the number of labs + meds given to each visit. Vitals will be linked later.
 attach_pci_score <- function() {
 
-    stays <- read.csv("preprocessed_demographics_for_epi.csv")
 
-    labs <- read.csv("labs.csv")
-    scores <- read.csv("scores.csv")
-    radiology <- read.csv("radiology_15Apr.csv") #this at least has timestamps
-    medications <- read.csv("medications.csv")
-    vitals <- read.csv("vitals.csv")
-    diagnoses <- read.csv("diagnoses.csv")
-
-    #The radiology file has no CSNs; we fix that by crosslinking by linking to the raw demographics file.
-    demographics <- read.csv("demographics.csv")
+    labs <- read.csv("labs.csv") 
+    #Link and attach CSNs to radiology
+    radiology <- read.csv("radiology_15Apr.csv")
+    demographics <- read.csv("demographics_8May.csv")
     info_to_csn_df <- demographics %>% select(NAME, DOB, ED_ARRIVAL_TIME, CSN) %>% distinct(NAME, DOB, ED_ARRIVAL_TIME, CSN)
     radiology <- radiology %>% inner_join(info_to_csn_df, by=c("NAME", "DOB", "ED_ARRIVAL_TIME")) #now radiology has CSNs
+
+
+    medications <- read.csv("medications.csv")
+    diagnoses <- read.csv("diagnoses.csv")
+    print("data loaded before stays")
+
+
+    stays <- read.csv(paste0(save_filepath, "preprocessed_demographics_for_epi.csv"))
+    print("data loaded")
 
     #Rename the 'prior admissions'/'visits' column.
     for (var in c("num_prior_admissions", "num_prior_visits_without_admission")) {
                             stays[[paste0("ord_", var)]] <- stays[[var]]
-                    }
-
+    }
 
     #Make and save a table of labs.
     tab <- table(toupper(labs$LAB))
-    write.csv(tab[order(tab, decreasing = TRUE)], "labs_by_freq.csv")
+    write.csv(tab[order(tab, decreasing = TRUE)], paste0(save_filepath, "labs_by_freq.csv"))
 
     #Filter out labs which occurred after a patient was discharged from the ED, and count the labs associated with each visit.
     labs <- labs %>% group_by(CSN) %>% filter(ymd_hms(LAB_START_TIME, truncated=3) < ymd_hms(ED_DISCHARGE_TIME, truncated=3)) %>% summarise(num_labs_over_visit = n())
@@ -473,14 +513,17 @@ attach_pci_score <- function() {
 
     #Save lists of the most common medication types/routes.
     tab <- table(toupper(medications$ROUTE))
-    write.csv(tab[order(tab, decreasing = TRUE)], "routes_by_freq.csv")
+    write.csv(tab[order(tab, decreasing = TRUE)], paste0(save_filepath, "routes_by_freq.csv"))
 
     tab <- table(toupper(medications$MEDICATION))
-    write.csv(tab[order(tab, decreasing = TRUE)], "meds_by_freq.csv")
+    write.csv(tab[order(tab, decreasing = TRUE)], paste0(save_filepath, "meds_by_freq.csv"))
 
+    print("start counting medications")
     #Count 'mild painkillers', IV meds, and other meds. (Again, this is not the distinction that will be used in later analyses; this is to get a sense of the field.)
     medications <- medications %>% group_by(CSN)  %>% filter(ymd_hms(MED_DATE_TIME, truncated=3) < ymd_hms(ED_CHECKOUT_TIME, truncated=3)) %>%
             summarise(num_mild_painkillers = sum(grepl("ACETAMENOPHEN", MEDICATION) | grepl("IBUPROFEN", MEDICATION)), num_other_meds=n()-num_mild_painkillers, num_iv_meds = sum(ROUTE=="IV" | ROUTE=="intravenous"))
+    
+    print("medications counted")
     stays <- left_join(stays, medications, by=c("csn"="CSN"))
     stays$num_iv_meds <- ifelse(is.na(stays$num_iv_meds), 0, stays$num_iv_meds)
     stays$num_mild_painkillers <- ifelse(is.na(stays$num_mild_painkillers), 0, stays$num_mild_painkillers)
@@ -570,8 +613,9 @@ attach_pci_score <- function() {
         "sleep_disorders" = 1,
         "alcohol_abuse" = 1
     )
+    print("codes defined")
 
-    #Get the condiitons associated with each patient
+    #Get the conditions associated with each patient
     unique_codes <- unique(diagnoses$DIAGNOSIS_CODE)
     corresponding_conditions <- purrr::map_vec(unique_codes, ~find_condition(.x, paed_icd_code_dict), .progress = TRUE)
     codes_with_conditions <- which(!is.na(corresponding_conditions))
@@ -589,131 +633,11 @@ attach_pci_score <- function() {
 
     #Link back to the original dataframe
     stays <- left_join(stays, diagnoses, by=c("csn"="CSN")) 
-    stays$PCI <- ifelse(is.na(stays$PCI), 0, stays$PCI) #the absence of legible conditions is  0
+    stays$PCI <- ifelse(is.na(stays$PCI), 0, stays$PCI) #the absence of legible conditions is a 0
 
     #transform but keep continuous
     stays$ord_PCI <- stays$PCI
     stays$PCI <- ifelse(stays$PCI == 0, "none", ifelse(stays$PCI==1, "one", ifelse(stays$PCI>1 & stays$PCI <5, "two_to_four", "five_or_more")))
-
-    #VITALS: link vitals within timeframe of visit.
-    barrier_times <- stays %>% select(csn, ed_checkout_time, ed_arrival_time)
-    vitals <- inner_join(vitals, barrier_times, by=c("CSN"="csn"))  %>% filter(ymd_hms(VITAL_DATE_TIME, truncated=3) < ymd_hms(ed_checkout_time, truncated=3),
-                    ymd_hms(VITAL_DATE_TIME, truncated=3) >= ymd_hms(ed_arrival_time, truncated=3)) %>% select(-c(ed_checkout_time, ed_arrival_time))
-                        
-    vitals$VITAL_VALUE <- as.numeric(vitals$VITAL_VALUE)
-
-    #Get heart rate and resp rate across whole stay.
-    hr_across_stay <- vitals %>% filter(VITAL=="HEART RATE", !is.na(VITAL_VALUE)) %>%
-            group_by(CSN) %>% summarise(min_heart_rate=min(VITAL_VALUE), max_heart_rate=max(VITAL_VALUE), mean_heart_rate=mean(VITAL_VALUE)) %>% clean_names()
-
-    rr_across_stay <- vitals %>% filter(VITAL=="Respiratory Rate", !is.na(VITAL_VALUE)) %>% 
-            group_by(CSN) %>% summarise(min_respiratory_rate=min(VITAL_VALUE), max_respiratory_rate=max(VITAL_VALUE), mean_respiratory_rate=mean(VITAL_VALUE)) %>% clean_names()
-
-
-    #Link age in months, and arrival time.
-    age_and_arrival_df <- stays %>% mutate(age_in_months=round(age_in_days/30)) %>% select(csn, age_in_months, ed_arrival_time)
-    vitals_with_age_and_arrival <- inner_join(vitals, age_and_arrival_df, by=c("CSN"="csn"))
-
-    #Get a flag for whether a child ever has a fever or is hypotensive- requires linking of age
-    flag_vitals_across_stay <- vitals_with_age_and_arrival %>% filter(VITAL=="Temperature" | VITAL=="SYSTOLIC BLOOD PRESSURE" | grepl("Oxygen", VITAL), !is.na(VITAL_VALUE)) %>%
-            group_by(CSN) %>% summarise(any_hypotension=any(VITAL=="SYSTOLIC BLOOD PRESSURE" & hypotensive(VITAL_VALUE, age_in_months)), any_low_temp=any(VITAL=="Temperature" & VITAL_VALUE<36),
-                    any_fever=any(VITAL=="Temperature" & VITAL_VALUE>=38), cts_mean_feverishness = mean(max(VITAL_VALUE[VITAL=="Temperature"]-38, 0)), cts_mean_hypotherm = mean(max(36-VITAL_VALUE[VITAL=="Temperature"], 0)),  
-                    any_low_ox = any(grepl("Oxygen", VITAL) & VITAL_VALUE < 90), cts_min_ox=min(VITAL_VALUE[grepl("Oxygen", VITAL)]), cts_max_ox=max(VITAL_VALUE[grepl("Oxygen", VITAL)]), cts_mean_ox=mean(VITAL_VALUE[grepl("Oxygen", VITAL)])) %>% clean_names()
-
-
-
-
-    #Repeat, but with only pre-triage vitals.
-    #First identify the first set of vitals taken
-    vitals_before_triage <- vitals_with_age_and_arrival %>% mutate(time_since_arrival = difftime(as.POSIXct(VITAL_DATE_TIME), as.POSIXct(ed_arrival_time), units="mins"))
-    first_timestamps <- vitals_before_triage %>% group_by(CSN) %>% summarise(first_timestamp = min(time_since_arrival))
-    vitals_before_triage <- left_join(vitals_before_triage, first_timestamps, by="CSN") %>% filter(time_since_arrival==first_timestamp) 
-
-    #Only vitals left are those associated with first timestamp (for first minute)
-    #No need to take means etc, as in general there should be only 1 reading, but use mean in case 2 vitals recorded at same timestamp
-    hr_before_triage <- vitals_before_triage %>% filter(VITAL=="HEART RATE", !is.na(VITAL_VALUE)) %>%
-            group_by(CSN) %>% summarise(mean_heart_rate_before_triage=mean(VITAL_VALUE)) %>% clean_names()
-
-    rr_before_triage <- vitals_before_triage %>% filter(VITAL=="Respiratory Rate", !is.na(VITAL_VALUE)) %>%
-            group_by(CSN) %>% summarise(mean_respiratory_rate_before_triage=mean(VITAL_VALUE)) %>% clean_names()
-
-    #Get flag for whether a child ever has a fever or is hypotensive before triage
-    flag_vitals_before_triage <- vitals_before_triage %>% filter(VITAL=="Temperature" | VITAL=="SYSTOLIC BLOOD PRESSURE" | grepl("Oxygen", VITAL), !is.na(VITAL_VALUE)) %>%
-            group_by(CSN) %>% summarise(hypotensive_at_triage=any(VITAL=="SYSTOLIC BLOOD PRESSURE" & hypotensive(VITAL_VALUE, age_in_months)), 
-                    fever_at_triage=any(VITAL=="Temperature" & VITAL_VALUE>=38), low_temp_at_triage=any(VITAL=="Temperature" & VITAL_VALUE<36),
-                    low_ox_at_triage = any(grepl("Oxygen", VITAL) & VITAL_VALUE < 90), 
-                    cts_mean_ox_at_triage=mean(VITAL_VALUE[grepl("Oxygen", VITAL)]), cts_mean_feverishness_at_triage = mean(max(VITAL_VALUE[VITAL=="Temperature"]-38, 0)), cts_mean_hypotherm_at_triage = mean(max(36-VITAL_VALUE[VITAL=="Temperature"], 0))) %>% clean_names()
-
-
-    stays <- left_join(stays, hr_across_stay, by="csn") 
-    stays <- left_join(stays, rr_across_stay, by="csn") 
-    stays <- left_join(stays, hr_before_triage, by="csn")
-    stays <- left_join(stays, rr_before_triage, by="csn")  
-    stays <- left_join(stays, flag_vitals_across_stay, by="csn") 
-    stays <- left_join(stays, flag_vitals_before_triage, by="csn") 
-
-
-    for (flag_name in c("hypotensive_at_triage", "fever_at_triage", "any_hypotension", "any_fever",
-                    "low_ox_at_triage", "any_low_ox", "any_low_temp", "low_temp_at_triage")) {
-            stays[[flag_name]] <- ifelse(is.na(stays[[flag_name]]), "unknown", ifelse(stays[[flag_name]], "yes", "no"))
-    }
-
-    vital_cols <- colnames(stays)
-    vital_cols <- vital_cols[(grepl("respiratory_rate", vital_cols) | grepl("heart_rate", vital_cols))]
-
-    #Convert HR and RR to standard deviations from age group mean
-    for (col in vital_cols) {
-            for (group in unique(stays$age_group)) {
-                    indices <- which(stays$age_group==group)
-                    mu <- mean(as.numeric(stays[indices, col]), na.rm=TRUE)
-                    sigma <- sd(as.numeric(stays[indices, col]), na.rm=TRUE)
-                    stays[indices, col] <- ifelse(is.na(stays[indices, col]), "not_taken", abs(as.numeric(stays[indices, col])-mu)/sigma)
-            } 
-            if (grepl("mean", col) | grepl("max", col) | grepl("min", col)) { 
-                    stays[[paste0("cts_", col)]] <- stays[[col]]
-            }
-            #now convert this into categories
-            stays[[col]] <- case_when(
-                    stays[[col]] < 1 ~ "less_than_1_sd",
-                    stays[[col]] < 2 & stays[[col]] >=1 ~ "between_1_and_2_sd",
-                    stays[[col]] > 2 ~ "more_than_2_sd",
-                    .default = "unknown")
-    }
-
-    #Now PAIN SCORES.
-    scores <- scores %>% filter(SCORE_VARIABLE=="NRS Generalized Pain Score")
-    scores <- inner_join(scores, stays, by=c("CSN"="csn")) %>% filter(ymd_hms(SCORE_DT_TIME, truncated=3) < ymd_hms(ed_checkout_time, truncated=3)) 
-    scores$SCORE <- as.numeric(scores$SCORE)
-    scores$time_since_arrival <- difftime(scores$SCORE_DT_TIME, scores$ed_arrival_time, units="mins")
-
-    #Record the maximum pain reported DURING FIRST SET OF VITALS
-    scores_with_timestamps <- inner_join(scores, first_timestamps, by=c("CSN"="CSN"))
-    scores_before_triage <- scores_with_timestamps %>% filter(time_since_arrival==first_timestamp) %>% group_by(CSN) %>% summarise(ord_max_pain_at_triage=max(SCORE))
-
-    #Record max pain reported overall
-    scores <- scores %>% group_by(CSN) %>% arrange(time_since_arrival, .by_group=TRUE) %>% summarise(ord_max_pain=max(SCORE), any_pain_increase=ifelse(first(SCORE)==max(SCORE), 0, 1))
-
-
-    stays <- left_join(stays, scores, by=c("csn"="CSN"))
-    stays <- left_join(stays, scores_before_triage, by=c("csn"="CSN"))
-
-    stays$any_pain_increase <- ifelse(is.na(stays$any_pain_increase), "unknown", stays$any_pain_increase)
-    stays$pain_max <- case_when(
-            stays$ord_max_pain == 0 ~ "none",
-            (stays$ord_max_pain > 0) & (stays$ord_max_pain < 4) ~ "mild",
-            (stays$ord_max_pain > 3) & (stays$ord_max_pain < 7) ~ "moderate",
-            stays$ord_max_pain > 6 ~ "severe",
-            .default = "unknown"
-    )
-
-    stays$pain_max_at_triage <- case_when(
-            stays$ord_max_pain_at_triage == 0 ~ "none",
-            (stays$ord_max_pain_at_triage > 0) & (stays$ord_max_pain_at_triage < 4) ~ "mild",
-            (stays$ord_max_pain_at_triage > 3) & (stays$ord_max_pain_at_triage < 7) ~ "moderate",
-            stays$ord_max_pain_at_triage > 6 ~ "severe",
-            .default = "unknown"
-    )
-
 
 
     #Flag ordinal data
@@ -729,7 +653,6 @@ attach_pci_score <- function() {
     stays$month_of_arrival <- lubridate::month(stays$ed_arrival_time)
     stays$hour_of_arrival <- lubridate::hour(ymd_hms(stays$ed_arrival_time))
     stays$day_of_arrival <- lubridate::wday(stays$ed_arrival_time)
-    stays$is_weekend <- ifelse((stays$day_of_arrival %in% c(6, 7)), 1, 0)
 
     #Filter out 66 visits with no legible hour
     stays <- stays %>% filter(!is.na(hour_of_arrival))
@@ -750,48 +673,42 @@ attach_pci_score <- function() {
     stays$timestamp <- difftime(as.POSIXct(stays$ed_arrival_time), first_arrival, units="mins")
 
     #Drop unnecessary columns
-    stays <- stays %>% select(-c(ed_arrival_time, triage_start_dt_tm, time_to_triage,
+    stays <- stays %>% select(-c(ed_arrival_time, triage_start_dt_tm,
                     num_mild_painkillers, num_other_meds, num_iv_meds, num_tests_over_visit))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       #num_labs_over_visit
 
     #filter out one visit which appears to be from 2012?
     stays <- stays %>% filter(!(year_of_arrival==2012))
 
-    write.csv(stays, "linked_stays_for_epi.csv")
+    write.csv(stays, paste0(save_filepath, "linked_stays_for_epi.csv"))
 }
 
 #Pull baseline factors from the above files and re-link the original chief complaint.
 get_baseline_factors <- function() {
-    baseline_factors <- read.csv("preprocessed_demographics_for_epi.csv")
-    linked_stays_for_epi <- read.csv("linked_stays_for_epi.csv")
-    triage_vital_names <- c("hypotensive_at_triage", "fever_at_triage", "low_temp_at_triage", "cts_mean_ox_at_triage", "cts_mean_heart_rate_before_triage", "cts_mean_respiratory_rate_before_triage", "ord_max_pain_at_triage")  
-    linked_stays_for_epi <- linked_stays_for_epi %>% select(all_of(c("csn", "hour_of_arrival", "day_of_arrival", "month_of_arrival", "year_of_arrival", "is_discharged", triage_vital_names))) 
+    baseline_factors <- read.csv(paste0(save_filepath, "preprocessed_demographics_for_epi.csv"))
+    linked_stays_for_epi <- read.csv(paste0(save_filepath, "linked_stays_for_epi.csv"))
+    linked_stays_for_epi <- linked_stays_for_epi %>% select(all_of(c("csn", "hour_of_arrival", "day_of_arrival", "month_of_arrival", "year_of_arrival"))) 
     
     baseline_factors <- inner_join(baseline_factors, linked_stays_for_epi, by="csn")
     baseline_factors <- baseline_factors %>% select(-c(admit_source, admitted_service, mrn, ed_arrival_time, ed_checkout_time, length_of_stay_in_minutes, triage_start_dt_tm, triage_complete_dt_tm,
-            age_in_years, sdi_quantile, miles_travelled, weight, time_to_triage,  departure_timestamp)) #keep both age group and continuous age, also arrival timestamp; discard all other 'categorised' versions of continuous variables
+            age_in_years, sdi_quantile, miles_travelled, weight, departure_timestamp)) #keep both age group and continuous age, also arrival timestamp; discard all other 'categorised' versions of continuous variables
 
-    write.csv(baseline_factors, "baseline-factors-for-patient-journey.csv")
-    baseline_factors <- baseline_factors %>% select(-c(is_discharged, X.1, X)) %>% rename(cts_age_in_days=age_in_days) #so that age_in_days is correctly labelled
+    write.csv(baseline_factors, paste0(save_filepath, "baseline-factors-for-patient-journey.csv"))
+    baseline_factors <- baseline_factors  %>% rename(cts_age_in_days=age_in_days) #so that age_in_days is correctly labelled
 
-
-    #DISCONNECT triage vitals
-    triage_vital_names <- colnames(baseline_factors)
-    triage_vital_names <- triage_vital_names[grepl("at_triage", triage_vital_names) | grepl("before_triage", triage_vital_names)]
-    baseline_factors <- baseline_factors %>% select(-c(all_of(triage_vital_names)))
 
     #CONNECT original complaints, disconnect complaint columns
-    demographics <- read.csv("demographics.csv")
+    demographics <- read.csv("demographics_8May.csv")
     complaint_cols <- colnames(baseline_factors)[startsWith(colnames(baseline_factors), "complaint_")]
     baseline_factors <- baseline_factors %>% select(-c(all_of(complaint_cols)))
     chief_complaints <- demographics %>% select(CSN, ED_COMPLAINT) %>% clean_names()
     baseline_factors <- inner_join(baseline_factors, chief_complaints, by="csn")
     baseline_factors$ed_complaint <- tolower(baseline_factors$ed_complaint)
 
-    write.csv(baseline_factors, "baseline_factors_with_og_complaint.csv")
+    write.csv(baseline_factors, paste0(save_filepath, "baseline_factors_with_og_complaint.csv"))
 
     #Save a dataframe linking CSN to complaint
-    df <- read.csv("baseline_factors_with_og_complaint.csv") %>% select(csn, ed_complaint)
-    write.csv(df, "csn-to-complaint.csv")
+    df <- read.csv(paste0(save_filepath, "baseline_factors_with_og_complaint.csv")) %>% select(csn, ed_complaint)
+    write.csv(df, paste0(save_filepath, "csn-to-complaint.csv"))
 }
 
 
@@ -799,16 +716,16 @@ get_baseline_factors <- function() {
 #Identify the 200 most common 'word stems' in chief complaints
 tag_complaints <- function() {
 
-    baseline_factors <- read.csv("preprocessed_demographics_for_epi.csv")
-    linked_stays_for_epi <- read.csv("linked_stays_for_epi.csv") 
-    linked_stays_for_epi <- linked_stays_for_epi %>% select(all_of(c("csn", "hour_of_arrival", "day_of_arrival", "month_of_arrival", "year_of_arrival", "is_discharged"))) 
+    baseline_factors <- read.csv(paste0(save_filepath, "preprocessed_demographics_for_epi.csv"))
+    linked_stays_for_epi <- read.csv(paste0(save_filepath, "linked_stays_for_epi.csv"))
+    linked_stays_for_epi <- linked_stays_for_epi %>% select(all_of(c("csn", "hour_of_arrival", "day_of_arrival", "month_of_arrival", "year_of_arrival"))) 
     baseline_factors <- inner_join(baseline_factors, linked_stays_for_epi, by="csn")
 
     #Link OG complaint
-    original_complaints <- read.csv("csn-to-complaint.csv")
+    original_complaints <- read.csv(paste0(save_filepath, "csn-to-complaint.csv"))
     baseline_factors <- baseline_factors %>% select(-starts_with("complaint_")) %>% inner_join(original_complaints, by="csn") %>% select(-c(mrn, admit_source, X.x, X.y,
             admitted_service, admit_source, triage_complete_dt_tm, triage_start_dt_tm, age_in_years, miles_travelled, sdi_quantile, 
-            weight, time_to_triage, departure_timestamp))
+            weight, departure_timestamp))
 
 
     #Expand common abbreviations.
@@ -965,7 +882,7 @@ tag_complaints <- function() {
 
     #Get each individual word
     all_words <- c()
-    all_words <- baseline_factors$ed_complaint %>% purrr::map(extract_words, .progress=TRUE) %>% unlist()
+    all_words <- baseline_factors$ed_complaint %>% purrr::map(~extract_words(.x, all_words), .progress=TRUE) %>% unlist()
 
     #Order by descending frequency of stems
     stems_by_frequency <- data.frame(stem=wordStem(all_words)) %>% group_by(stem) %>% summarise(count=n()) %>% arrange(desc(count))
@@ -983,7 +900,7 @@ tag_complaints <- function() {
     check_matrix <- complaint_contains_matrix %>% inner_join(ed_complaints_only, by="csn")
     
     baseline_factors <- baseline_factors %>% inner_join(complaint_contains_matrix, by="csn") %>% select(-ed_complaint)
-    write.csv(baseline_factors, "baseline-factors-with-top-200-complaint-stems-tagged.csv")
+    write.csv(baseline_factors, paste0(save_filepath, "baseline-factors-with-top-200-complaint-stems-tagged.csv"))
 
 }
 
@@ -991,20 +908,28 @@ tag_complaints <- function() {
 link_key_meds <- function() {
 
     #Load data
-    baseline_factors <- read.csv("baseline-factors-with-top-200-complaint-stems-tagged.csv") %>% select(-length_of_stay_in_minutes)
+    baseline_factors <- read.csv((paste0(save_filepath, "baseline-factors-with-top-200-complaint-stems-tagged.csv"))) %>% select(-length_of_stay_in_minutes)
+    print("baseline factors")
     labs <- read.csv("labs.csv")
+    print("labs")
     medications <- read.csv("medications.csv")
+    print("meds")
     scores <- read.csv("scores.csv")
+    print("scores")
     scores <- scores %>% filter(SCORE_VARIABLE=="NRS Generalized Pain Score")
     vitals <- read.csv("vitals.csv")
+    print("vitals")
 
     #Link and attach CSNs to radiology
     radiology <- read.csv("radiology_15Apr.csv")
-    demographics <- read.csv("demographics.csv")
+    print("rad loaded")
+    demographics <- read.csv("demographics_8May.csv")
     info_to_csn_df <- demographics %>% select(NAME, DOB, ED_ARRIVAL_TIME, CSN) %>% distinct(NAME, DOB, ED_ARRIVAL_TIME, CSN)
     radiology <- radiology %>% inner_join(info_to_csn_df, by=c("NAME", "DOB", "ED_ARRIVAL_TIME")) #now radiology has CSNs
 
 
+
+    print("loaded")
     #Compile a sequence of events that happens to each patient over their ED stays
 
 
@@ -1023,7 +948,6 @@ link_key_meds <- function() {
     events <- rbind(events, discharge_times)
 
     departure_times<- baseline_factors %>% filter(is_discharged==0 & is_admitted==0) %>% select(csn, ed_checkout_time) %>% rename(event_time=ed_checkout_time) %>% mutate(event_type="endpoint", event_name="other departure", lab_id=NA, event_value=NA)
-    print(head(departure_times))
     events <- rbind(events, departure_times)
 
 
@@ -1042,17 +966,6 @@ link_key_meds <- function() {
 
     vital_times <- vitals %>% select(CSN, VITAL_DATE_TIME, VITAL, VITAL_VALUE) %>% rename(csn=CSN, event_time=VITAL_DATE_TIME, event_name=VITAL, event_value=VITAL_VALUE) %>% mutate(event_type="vitals_taken", lab_id=NA)
     events <- rbind(events, vital_times)
-
-    #Attach labs (excluded from later analyses, only available for 2024)
-    labs_to_include <- labs %>% group_by(LAB) %>% summarise(count=n()) %>% arrange(desc(count))
-    lab_ordered_times <- labs %>% select(CSN, LAB_START_TIME, LAB) %>% filter(LAB %in% labs_to_include$LAB[1:num_labs_to_include]) %>% 
-        rename(csn=CSN, event_time=LAB_START_TIME, event_name=LAB) %>% mutate(event_type="lab_ordered", lab_id=row_number(), event_value=NA) #lab ID allows linking of labs and results
-    events <- rbind(events, lab_ordered_times)
-
-    #Attach lab results (as above)
-    lab_result_times <- labs %>% select(CSN, LAB_DATE_TIME, LAB, VALUE) %>% filter(LAB %in% labs_to_include$LAB[1:num_labs_to_include]) %>%  
-        rename(csn=CSN, event_time=LAB_DATE_TIME, event_name=LAB, event_value=VALUE) %>% mutate(event_type="lab_result", lab_id=row_number()) #will be the same as the row number in previous step
-    events <- rbind(events, lab_result_times)
 
 
     #Attach SPECIFIC medications indicated by clinical collaborators (or flagged by the model) as indicators of likely admission or discharge
@@ -1084,8 +997,9 @@ link_key_meds <- function() {
 
 
     #Clean names
-    events$event_name <- purrr::map_vec(events$event_name, clean_names, .progress=TRUE)
-
+    events <- events %>% mutate(cleaned_event_name = clean_value_names(event_name)) %>% 
+        select(-event_name) %>%
+        rename(event_name=cleaned_event_name)
 
     #Now convert timestamps to "minutes since arrival"
     #Make sure we get only events taken before checkout time
@@ -1098,18 +1012,19 @@ link_key_meds <- function() {
 
     events <- events %>% filter(!(event_type=="arrival")) %>% group_by(csn) %>% arrange(event_time, .by_group = TRUE)
 
-    write.csv(events, "focused-patient-journey-events.csv")
+    write.csv(events, paste0(save_filepath, "focused-patient-journey-events.csv"))
 
 }
 
 #Preprocess main demographic file.
-link_demographics()
+#link_demographics()
 #Attach PCI score.
-attach_pci_score()
+gc()
+#attach_pci_score()
 #Pull out key baseline factors and attach original ED complaint.
-get_baseline_factors()
+#get_baseline_factors()
 #Pull out 200 most common stems from ED complaint.
-tag_complaints()
+#tag_complaints()
 #Link key meds, and the time at which they were given to patients
 link_key_meds()
 
