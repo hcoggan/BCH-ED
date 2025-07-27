@@ -11,6 +11,8 @@ NOTE: The user will have to specify directions for save_filepath in order to run
 
 'make-forest-plots.r': produces forest plots for the paper.
 
+'make-crosstabl.r': produces Table 1.
+
 'sample-visits-for-model-training.r': 'samples' each visit every 30 minutes and splits test/train data chronologically to train a predictive model. NOTE: this requires
 
 'hyperparameter-tuning.py': uses 5-fold cross-validation to select hyperparameters on the training data.
