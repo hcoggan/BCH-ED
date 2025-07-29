@@ -1017,14 +1017,14 @@ link_key_meds <- function() {
 }
 
 #Preprocess main demographic file.
-#link_demographics()
+link_demographics()
 #Attach PCI score.
 gc()
-#attach_pci_score()
+attach_pci_score()
 #Pull out key baseline factors and attach original ED complaint.
-#get_baseline_factors()
+get_baseline_factors()
 #Pull out 200 most common stems from ED complaint.
-#tag_complaints()
+tag_complaints()
 #Link key meds, and the time at which they were given to patients
 link_key_meds()
 
