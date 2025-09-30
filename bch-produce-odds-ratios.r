@@ -72,7 +72,7 @@ convert_baseline_factors <- function(visits) {
         }
     }
     #Add an extra step where unknown continuous factors are replaced with their cohort-wide mean.
-    #For weight, which has already been normalised, this should just be 0:
+    #Assume all patients with no recorded weight have normal weight. 
     converted_factors$weight_unknown <- ifelse(converted_factors$weight=="unknown", 1, 0)
     converted_factors$weight <- ifelse(converted_factors$weight=="unknown", 0, as.numeric(converted_factors$weight))
 
