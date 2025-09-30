@@ -509,14 +509,11 @@ for (col in all_vitals) {
     visits[[paste0(col, "_unknown")]] <- 0
     idx_to_replace <- which(is.na(visits[[col]]))
     visits[[paste0(col, "_unknown")]][idx_to_replace] <- 1
-    if (col %in% vitals_to_normalise) {
-        visits[[col]][idx_to_replace] <- 0 #because these have been normalised, so the average at each age group should be 0
-    } else { #Just replace with the age-specific mean for pain, BP (TEMP EXCLUDED)
-        for (group in unique(visits$age_group)) {
-            idx <- which(visits$age_group==group)
-            mean <- mean(visits[[col]], na.rm=TRUE)
-            visits[[col]][intersect(idx, idx_to_replace)] <- mean
-        }
+    #Just replace with the age-specific mean 
+    for (group in unique(visits$age_group)) {
+        idx <- which(visits$age_group==group)
+        mean <- mean(visits[[col]], na.rm=TRUE)
+        visits[[col]][intersect(idx, idx_to_replace)] <- mean
     }
 }
 
