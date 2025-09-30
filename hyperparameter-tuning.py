@@ -9,13 +9,11 @@ import argparse
 load_path= ""
 save_path = ""
 
-training_window_name="four_years"
-
 num_folds = 5 #5-fold cross-validation
 
 
 #Load data
-train_data = pd.read_csv(load_path+ "training_window_"+ training_window_name+ "_training_data.csv", index_col=0)
+train_data = pd.read_csv(load_path+ "training-data.csv", index_col=0)
               
 
 #assign training weights- sum to 1 across a visit
@@ -23,12 +21,11 @@ train_data['timestamp_count'] = train_data.groupby('csn')['csn'].transform('coun
 train_data['training_weight'] = 1 / train_data['timestamp_count']
 train_data = train_data.drop(columns='timestamp_count')
 
-column_labels = [name for name in train_data.columns.tolist() if name.lower().startswith("x")]
+#Exclude counting labels, which start with X or V.
+column_labels = [name for name in train_data.columns.tolist() if (name.lower().startswith("x") or name.lower().startswith("v"))]
 
 
-features_to_exclude = ["csn", "arrival_timestamp", "is_admitted", "is_discharged", "training_weight", "ed_complaint", "pediatric_comorbidity_score",
-                             "mean_temperature", "max_temperature", "min_temperature", "mean_mean_arterial_pressure_device", "max_mean_arterial_pressure_device",
-                             "min_mean_arterial_pressure_device"] + column_labels
+features_to_exclude = ["csn", "arrival_timestamp", "is_admitted", "training_weight"] + column_labels
 Xs_train = train_data.drop(columns=features_to_exclude, errors="ignore") #ignore if cols don't exist
 ys_train = train_data['is_admitted']
 ids_train = train_data[['csn', 'timestamp']] #so we can identify this later
@@ -80,6 +77,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     num_iter = args.num_iter
     cv(num_iter)
-
-
-

@@ -10,11 +10,10 @@ import random
 load_path = ""
 save_path = ""
 
-training_window_name = "four_years"
 num_folds = 5 #5-fold cross-validation
 
-train_data = pd.read_csv(load_path+ "training_window_"+ training_window_name+ "_training_data.csv", index_col=0)
-test_data = pd.read_csv(load_path+ "training_window_"+ training_window_name+ "_test_data.csv", index_col=0)
+train_data = pd.read_csv(load_path+ "training-data.csv", index_col=0)
+test_data = pd.read_csv(load_path+ "test-data.csv", index_col=0)
 
 
 #assign training weights- sum to 1 across a visit
@@ -27,29 +26,27 @@ test_data['training_weight'] = 1 / test_data['timestamp_count']
 test_data = test_data.drop(columns='timestamp_count')
 
 
-column_labels = [name for name in train_data.columns.tolist() + test_data.columns.tolist() if name.lower().startswith("x")]
+column_labels = [name for name in train_data.columns.tolist() + test_data.columns.tolist() if (name.lower().startswith("x") or name.lower().startswith("v"))]
 
-features_to_exclude = ["csn", "arrival_timestamp", "is_admitted", "is_discharged", "training_weight", "ed_complaint", "pediatric_comorbidity_score",
-                             "mean_temperature", "max_temperature", "min_temperature", "mean_mean_arterial_pressure_device", "max_mean_arterial_pressure_device",
-                             "min_mean_arterial_pressure_device"] + column_labels
+features_to_exclude = ["csn", "arrival_timestamp", "is_admitted", "is_discharged", "training_weight"] + column_labels
 Xs_train = train_data.drop(columns=features_to_exclude, errors="ignore") #ignore if cols don't exist
 ys_train = train_data['is_admitted']
-ids_train = train_data[['csn', 'timestamp']] #so we can identify this later
+ids_train = train_data[['csn', 'snapshot']] #so we can identify this later
 weights_train = train_data['training_weight'] #so all visits add up to 1 patient
 
 Xs_test = test_data.drop(columns=features_to_exclude, errors="ignore") #ignore if cols don't exist
 ys_test = test_data['is_admitted']
-ids_test = test_data[['csn', 'timestamp']] #so we can identify this later
+ids_test = test_data[['csn', 'snapshot']] #so we can identify this later
 weights_test = test_data['training_weight'] #so all visits add up to 1 patient
 
 
 
-best_params = {'n_estimators': 992,
-              'learning_rate':  0.5974666765171989,
-              'subsample': 0.3988175284874041,
-              'max_depth': 9,
-              'colsample_bytree': 0.7506276501255351,
-              'min_child_weight': 3,
+best_params = {'n_estimators': 539,
+              'learning_rate':  0.09552519644617961,
+              'subsample':  0.8919476609951504,
+              'max_depth': 7,
+              'colsample_bytree': 0.5136475392911521,
+              'min_child_weight': 1,
               'tree_method': ['gpu_hist'],
               'predictor': ['gpu_predictor']
              }
