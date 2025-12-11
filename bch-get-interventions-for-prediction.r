@@ -32,12 +32,7 @@ library(ggridges)
 library(comorbidity)
 
 
-# setwd("/Volumes/chip-lacava/Groups/BCH-ED/")
-# loadpath <- "raw-data/"
-# savepath <- "reprocessing/"
-
-
-setwd("/Users/helenacoggan/Documents/OSXLAP12460/BCH-data-2025/temp-dict")
+setwd("/Volumes/chip-lacava/Groups/BCH-ED/")
 loadpath <- "raw-data/"
 savepath <- "reprocessing/"
 
