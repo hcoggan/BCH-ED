@@ -32,7 +32,7 @@ features_to_exclude = ["csn", "arrival_timestamp", "is_admitted", "is_discharged
 Xs_train = train_data.drop(columns=features_to_exclude, errors="ignore") #ignore if cols don't exist
 ys_train = train_data['is_admitted']
 ids_train = train_data[['csn', 'snapshot']] #so we can identify this later
-weights_train = train_data['training_weight'] #so all visits add up to 1 patient
+weights_train = train_data['training_weight'] #so all snapshots in a visit have weights adding up to 1
 
 Xs_test = test_data.drop(columns=features_to_exclude, errors="ignore") #ignore if cols don't exist
 ys_test = test_data['is_admitted']
